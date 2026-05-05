@@ -1,3 +1,8 @@
 requests
 speedtest-cli
+streamlit
+plotly
+pandas
+mysql-connector-python
+python-dotenv
 
