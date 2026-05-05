@@ -464,9 +464,9 @@ Exemplos de uso:
     
     parser.add_argument(
         '--loop', 
-        type=int, 
+        type=float, 
         metavar='MINUTOS',
-        help='Modo looping: executa teste a cada N minutos'
+        help='Modo looping: executa teste a cada N minutos (Aceita valores fracionados, ex: 0.25 para 15s)'
     )
     
     parser.add_argument(
@@ -504,8 +504,8 @@ Exemplos de uso:
     
     try:
         if args.loop is not None:
-            if args.loop < 1:
-                print("[-] Erro: --loop deve ser >= 1")
+            if args.loop <= 0:
+                print("[-] Erro: --loop deve ser maior que 0")
                 sys.exit(1)
             run_loop_test(args.loop, args.speedtest, args.sync, args.sync_interval, args.location)
         else:
