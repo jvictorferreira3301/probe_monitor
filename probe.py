@@ -8,21 +8,10 @@ import json
 import argparse
 import sys
 import requests
+from dotenv import load_dotenv
 
 # === CARREGA .env ===
-def carregar_env():
-    """Carrega variáveis do arquivo .env"""
-    env_file = '.env'
-    if os.path.exists(env_file):
-        with open(env_file) as f:
-            for linha in f:
-                linha = linha.strip()
-                if linha and not linha.startswith('#'):
-                    if '=' in linha:
-                        chave, valor = linha.split('=', 1)
-                        os.environ[chave.strip()] = valor.strip()
-
-carregar_env()
+load_dotenv('.env')
 
 # === CONFIGURAÇÕES ===
 SERVER_ADDRESS = ('186.228.38.168', 10050)
@@ -112,18 +101,25 @@ def get_municipio_nominatim(latitude, longitude):
         return 'N/A'
 
 def run_network_test():
-    """Executa o teste de latência e perda de pacotes com análise de ordem/duplicatas"""
+    """Executa o teste de latência e perda de pacotes com análise de ordem/duplicatas.
+
+    Definições (mais adequadas e consistentes):
+    - Pacotes_Recebidos: quantidade de IDs únicos recebidos (0..TOTAL_PACKETS-1)
+    - Perda_%: baseada em IDs únicos faltantes
+    - Duplicados: quantidade total de respostas duplicadas (além da primeira por ID)
+    - Out_of_Order: reordenação real (um ID menor chegando após um maior), ignorando duplicatas
+    """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(0.8)
     
     sent_timestamps = {}
     received_latencies = []
+    latency_by_id = {}
     received_packets = {}
     received_sequence = []
-    received_count = 0
     out_of_order_count = 0
     out_of_order_list = []
-    last_packet_id = None
+    last_unique_packet_id = None
     
     print(f"[*] Enviando {TOTAL_PACKETS} pacotes para {SERVER_ADDRESS[0]}...")
     
@@ -137,36 +133,66 @@ def run_network_test():
     print("[*] Aguardando respostas...")
     
     # Recebimento de pacotes
-    for _ in range(TOTAL_PACKETS):
+    # Não limita a "TOTAL_PACKETS leituras" (duplicatas podem consumir o budget e mascarar perdas).
+    start_wait = time.perf_counter()
+    last_activity = start_wait
+    max_wait_seconds = 6.0
+    idle_break_seconds = 1.6  # ~2x timeout
+
+    while True:
+        now = time.perf_counter()
+        if now - start_wait >= max_wait_seconds:
+            break
+        if now - last_activity >= idle_break_seconds:
+            break
+        if len(received_packets) >= TOTAL_PACKETS:
+            break
+
         try:
             resp, _ = sock.recvfrom(1024)
             recv_time = time.perf_counter()
-            pkt_id = int(resp.decode())
-            
-            if pkt_id in sent_timestamps:
-                latency = (recv_time - sent_timestamps[pkt_id]) * 1000
-                received_latencies.append(latency)
-                received_sequence.append(pkt_id)
-                received_count += 1
-                
-                # Contagem de duplicatas
-                received_packets[pkt_id] = received_packets.get(pkt_id, 0) + 1
-                
-                # Detecção de fora de ordem
-                if last_packet_id is not None and pkt_id != last_packet_id + 1:
+            last_activity = recv_time
+
+            try:
+                pkt_id = int(resp.decode().strip())
+            except Exception:
+                continue
+
+            # Ignora respostas fora do range esperado
+            if pkt_id not in sent_timestamps:
+                continue
+
+            received_sequence.append(pkt_id)
+
+            # Contagem de recebimentos por ID
+            prev_count = received_packets.get(pkt_id, 0)
+            received_packets[pkt_id] = prev_count + 1
+            first_time = prev_count == 0
+
+            # Latência: considera apenas a primeira chegada por ID (evita viés por duplicatas)
+            if first_time:
+                latency_ms = (recv_time - sent_timestamps[pkt_id]) * 1000
+                latency_by_id[pkt_id] = latency_ms
+
+                # Reordenação real (apenas em primeiras chegadas)
+                if last_unique_packet_id is not None and pkt_id < last_unique_packet_id:
                     out_of_order_count += 1
                     out_of_order_list.append(pkt_id)
-                
-                last_packet_id = pkt_id
+
+                last_unique_packet_id = pkt_id
+
         except socket.timeout:
-            pass
+            # Se não chegou nada dentro do timeout, o loop já vai encerrar por idle_break_seconds.
+            continue
     
     sock.close()
     
     # Cálculos finais
+    received_count = len(received_packets)
+    received_latencies = list(latency_by_id.values())
     avg_lat = sum(received_latencies) / len(received_latencies) if received_latencies else 0
     loss = ((TOTAL_PACKETS - received_count) / TOTAL_PACKETS) * 100
-    duplicate_count = sum(1 for count in received_packets.values() if count > 1)
+    duplicate_count = sum(max(0, count - 1) for count in received_packets.values())
     missing_packets = sorted(set(range(TOTAL_PACKETS)) - set(received_packets.keys()))
     
     return {
@@ -222,10 +248,10 @@ def run_speedtest():
         }
 
 def save_to_csv(cell, network_test, speedtest_data=None, location_data=None):
-    """Salva dados no CSV garantindo sempre 22 colunas para evitar desalinhamento"""
+    """Salva dados no CSV garantindo sempre 23 colunas para evitar desalinhamento"""
     os.makedirs(DIR_PATH, exist_ok=True)
     
-    # Cabeçalho ÚNICO e definitivo (22 colunas com geolocation + fingerprint)
+    # Cabeçalho ÚNICO e definitivo (23 colunas com geolocation + fingerprint)
     header = [
         "Data_Hora", "Tecnologia", "PCI", "TAC", "Cell_ID",
         "RSRP_dBm", "RSRQ_dB", "SINR",
@@ -253,7 +279,7 @@ def save_to_csv(cell, network_test, speedtest_data=None, location_data=None):
     tac = cell.get('tac', 'N/A')
     cid = cell.get('ci') or cell.get('nci') or 'N/A'
     
-    # Linha ÚNICA e definitiva (22 colunas com geolocation + fingerprint, seguindo a ordem do header)
+    # Linha ÚNICA e definitiva (23 colunas com geolocation + fingerprint, seguindo a ordem do header)
     row = [
         datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         tech.upper(), pci, tac, cid,
