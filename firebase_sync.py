@@ -4,21 +4,10 @@ import sys
 import json
 from datetime import datetime
 import requests
+from dotenv import load_dotenv
 
 # === CARREGA .env ===
-def carregar_env():
-    """Carrega variáveis do arquivo .env"""
-    env_file = '.env'
-    if os.path.exists(env_file):
-        with open(env_file) as f:
-            for linha in f:
-                linha = linha.strip()
-                if linha and not linha.startswith('#'):
-                    if '=' in linha:
-                        chave, valor = linha.split('=', 1)
-                        os.environ[chave.strip()] = valor.strip()
-
-carregar_env()
+load_dotenv('.env')
 
 # === CONFIGURAÇÕES ===
 CSV_FILE = '/sdcard/Download/relatorio_completo_rede.csv'
